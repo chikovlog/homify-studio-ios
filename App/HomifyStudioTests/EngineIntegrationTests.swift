@@ -159,35 +159,44 @@ enum TestMedia {
         guard writer.startWriting() else { throw writer.error ?? NSError(domain: "TestMedia", code: 1) }
         writer.startSession(atSourceTime: .zero)
 
+        // Audio and video must be appended interleaved by time: AVAssetWriter
+        // stops accepting one input while it waits for the other to catch up.
         let frames = Int(seconds * Double(fps))
+        let sampleRate = 44_100
+        var audioWritten = 0
         for i in 0..<frames {
-            while !vIn.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
+            try await waitUntilReady(vIn)
             guard let pool = adaptor.pixelBufferPool else { throw NSError(domain: "TestMedia", code: 2) }
             var pb: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
             guard let buffer = pb else { throw NSError(domain: "TestMedia", code: 3) }
             fill(buffer, frame: i, of: frames)
-            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: fps))
+            _ = adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: fps))
+
+            if let aIn {
+                let target = Int(Double(i + 1) / Double(fps) * Double(sampleRate))
+                while audioWritten < target {
+                    try await waitUntilReady(aIn)
+                    let n = min(1_470, target - audioWritten)
+                    if let sb = makeToneBuffer(start: audioWritten, count: n, sampleRate: sampleRate) { _ = aIn.append(sb) }
+                    audioWritten += n
+                }
+            }
         }
         vIn.markAsFinished()
-
-        if let aIn {
-            let sampleRate = 44_100
-            let total = Int(seconds * Double(sampleRate))
-            let chunk = 4_410
-            var written = 0
-            while written < total {
-                while !aIn.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
-                let n = min(chunk, total - written)
-                if let sb = makeToneBuffer(start: written, count: n, sampleRate: sampleRate) { aIn.append(sb) }
-                written += n
-            }
-            aIn.markAsFinished()
-        }
+        aIn?.markAsFinished()
 
         await writer.finishWriting()
         guard writer.status == .completed else { throw writer.error ?? NSError(domain: "TestMedia", code: 4) }
         return url
+    }
+
+    private static func waitUntilReady(_ input: AVAssetWriterInput) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while !input.isReadyForMoreMediaData {
+            if Date() > deadline { throw NSError(domain: "TestMedia", code: 5, userInfo: [NSLocalizedDescriptionKey: "Writer input stalled"]) }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
     }
 
     private static func fill(_ buffer: CVPixelBuffer, frame: Int, of total: Int) {
