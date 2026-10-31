@@ -104,8 +104,8 @@ final class EngineIntegrationTests: XCTestCase {
     }
 
     func testCancelExportStopsCleanly() async throws {
-        let a = try await TestMedia.makeVideo(at: root.appendingPathComponent("a.mov"), seconds: 6, fps: 30,
-                                              size: CGSize(width: 640, height: 480), withAudio: false)
+        let a = try await TestMedia.makeVideo(at: root.appendingPathComponent("a.mov"), seconds: 8, fps: 30,
+                                              size: CGSize(width: 480, height: 360), withAudio: false)
         var p = try store.create(name: "Cancel", aspectRatio: .landscape16x9)
         let m = try await MediaImporter(store: store).importFile(at: a, projectID: p.id, move: false)
         p.addMedia(m)
@@ -222,23 +222,19 @@ enum TestMedia {
         return url
     }
 
+    /// Fast fill (row memset + a moving white bar) so Debug builds stay quick.
     private static func fill(_ buffer: CVPixelBuffer, frame: Int, of total: Int) {
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
         let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
         let bpr = CVPixelBufferGetBytesPerRow(buffer)
-        let bar = Int(Double(frame) / Double(max(1, total)) * Double(w))
+        let shade = Int32(40 + (frame * 150) / max(1, total))
+        let barX = min(w - 8, max(0, frame * w / max(1, total)))
         for y in 0..<h {
-            let row = base.advanced(by: y * bpr).assumingMemoryBound(to: UInt8.self)
-            for x in 0..<w {
-                let o = x * 4
-                let onBar = abs(x - bar) < 6
-                row[o] = onBar ? 255 : UInt8(y * 255 / max(1, h))      // B
-                row[o + 1] = onBar ? 255 : UInt8(x * 255 / max(1, w))  // G
-                row[o + 2] = onBar ? 255 : 80                           // R
-                row[o + 3] = 255
-            }
+            let row = base.advanced(by: y * bpr)
+            memset(row, shade, w * 4)
+            memset(row.advanced(by: barX * 4), 255, 8 * 4)
         }
     }
 
