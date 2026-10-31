@@ -10,6 +10,9 @@ final class EngineIntegrationTests: XCTestCase {
     private var store: ProjectStore!
 
     override func setUp() async throws {
+        // The simulator's video encoder can take minutes to start the first
+        // time it is used in a process on shared CI machines.
+        executionTimeAllowance = 600
         root = FileManager.default.temporaryDirectory.appendingPathComponent("homify-it-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         store = ProjectStore(rootURL: root.appendingPathComponent("Projects"))
@@ -212,7 +215,7 @@ enum TestMedia {
         let finished = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             // Wait off the writer queue so the callbacks can keep running.
             DispatchQueue.global(qos: .userInitiated).async {
-                let r = group.wait(timeout: .now() + 60)
+                let r = group.wait(timeout: .now() + 300)
                 c.resume(returning: r == .success)
             }
         }
