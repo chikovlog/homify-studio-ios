@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-linux:
+    name: Core engine tests (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        working-directory: Packages/HomifyCore
+        run: swift test
+
+  ios:
+    name: iOS build + simulator tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Core engine tests (macOS)
+        working-directory: Packages/HomifyCore
+        run: swift test
+
+      - name: Pick simulator
+        id: sim
+        run: echo "udid=$(./scripts/pick-simulator.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test on simulator
+        run: |
+          mkdir -p build
+          set +e
+          xcodebuild test \
+            -project HomifyStudio.xcodeproj \
+            -scheme HomifyStudio \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -resultBundlePath build/Tests.xcresult \
+            CODE_SIGNING_ALLOWED=NO > build/test.log 2>&1
+          status=$?
+          grep -E "error:|warning: .*/App/|Test Case .*(passed|failed)|Executed|\*\* TEST" build/test.log
+          exit $status
+
+      - name: Unsigned device build (Release, arm64)
+        run: |
+          mkdir -p build
+          set +e
+          xcodebuild build \
+            -project HomifyStudio.xcodeproj \
+            -scheme HomifyStudio \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO > build/device.log 2>&1
+          status=$?
+          grep -E "error:|\*\* BUILD" build/device.log
+          exit $status
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-logs
+          path: |
+            build/*.log
+            build/Tests.xcresult
+          if-no-files-found: ignore
