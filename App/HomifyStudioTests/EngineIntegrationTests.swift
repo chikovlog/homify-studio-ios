@@ -104,12 +104,16 @@ final class EngineIntegrationTests: XCTestCase {
     }
 
     func testCancelExportStopsCleanly() async throws {
-        let a = try await TestMedia.makeVideo(at: root.appendingPathComponent("a.mov"), seconds: 8, fps: 30,
-                                              size: CGSize(width: 480, height: 360), withAudio: false)
+        let a = try await TestMedia.makeVideo(at: root.appendingPathComponent("a.mov"), seconds: 2, fps: 30,
+                                              size: CGSize(width: 160, height: 120), withAudio: false)
         var p = try store.create(name: "Cancel", aspectRatio: .landscape16x9)
         let m = try await MediaImporter(store: store).importFile(at: a, projectID: p.id, move: false)
         p.addMedia(m)
-        _ = try p.insertIntoMain(mediaID: m.id, near: .zero)
+        let first = try p.insertIntoMain(mediaID: m.id, near: .zero)
+        // A long timeline from one short source (the simulator encoder is slow
+        // at generating long test media).
+        for _ in 0..<14 { _ = try p.duplicate(clipID: first) }
+        XCTAssertEqual(p.duration.seconds, 30, accuracy: 0.01)
         let out = root.appendingPathComponent("cancel.mp4")
         let exporter = VideoExporter()
         let task = Task { try await exporter.export(project: p, store: store, settings: ExportSettings(), to: out) { _ in } }
