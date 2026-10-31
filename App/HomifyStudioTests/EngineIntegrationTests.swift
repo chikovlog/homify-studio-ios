@@ -159,44 +159,67 @@ enum TestMedia {
         guard writer.startWriting() else { throw writer.error ?? NSError(domain: "TestMedia", code: 1) }
         writer.startSession(atSourceTime: .zero)
 
-        // Audio and video must be appended interleaved by time: AVAssetWriter
-        // stops accepting one input while it waits for the other to catch up.
+        // Pull model (Apple's documented pattern): each input asks for data
+        // on a serial queue and the writer interleaves them itself.
         let frames = Int(seconds * Double(fps))
         let sampleRate = 44_100
-        var audioWritten = 0
-        for i in 0..<frames {
-            try await waitUntilReady(vIn)
-            guard let pool = adaptor.pixelBufferPool else { throw NSError(domain: "TestMedia", code: 2) }
-            var pb: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
-            guard let buffer = pb else { throw NSError(domain: "TestMedia", code: 3) }
-            fill(buffer, frame: i, of: frames)
-            _ = adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: fps))
+        let totalSamples = Int(seconds * Double(sampleRate))
+        let queue = DispatchQueue(label: "studio.homify.testmedia")
+        let group = DispatchGroup()
 
-            if let aIn {
-                let target = Int(Double(i + 1) / Double(fps) * Double(sampleRate))
-                while audioWritten < target {
-                    try await waitUntilReady(aIn)
-                    let n = min(1_470, target - audioWritten)
-                    if let sb = makeToneBuffer(start: audioWritten, count: n, sampleRate: sampleRate) { _ = aIn.append(sb) }
-                    audioWritten += n
+        var frameIndex = 0
+        var videoDone = false
+        group.enter()
+        vIn.requestMediaDataWhenReady(on: queue) {
+            while vIn.isReadyForMoreMediaData && frameIndex < frames {
+                guard let pool = adaptor.pixelBufferPool else { break }
+                var pb: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
+                guard let buffer = pb else { break }
+                fill(buffer, frame: frameIndex, of: frames)
+                _ = adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frameIndex), timescale: fps))
+                frameIndex += 1
+            }
+            if frameIndex >= frames && !videoDone {
+                videoDone = true
+                vIn.markAsFinished()
+                group.leave()
+            }
+        }
+
+        if let aIn {
+            var written = 0
+            var audioDone = false
+            group.enter()
+            aIn.requestMediaDataWhenReady(on: queue) {
+                while aIn.isReadyForMoreMediaData && written < totalSamples {
+                    let n = min(1_470, totalSamples - written)
+                    if let sb = makeToneBuffer(start: written, count: n, sampleRate: sampleRate) { _ = aIn.append(sb) }
+                    written += n
+                }
+                if written >= totalSamples && !audioDone {
+                    audioDone = true
+                    aIn.markAsFinished()
+                    group.leave()
                 }
             }
         }
-        vIn.markAsFinished()
-        aIn?.markAsFinished()
+
+        let finished = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            // Wait off the writer queue so the callbacks can keep running.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let r = group.wait(timeout: .now() + 60)
+                c.resume(returning: r == .success)
+            }
+        }
+        guard finished else {
+            writer.cancelWriting()
+            throw NSError(domain: "TestMedia", code: 5, userInfo: [NSLocalizedDescriptionKey: "Writer timed out (\(writer.status.rawValue)) \(writer.error?.localizedDescription ?? "")"])
+        }
 
         await writer.finishWriting()
         guard writer.status == .completed else { throw writer.error ?? NSError(domain: "TestMedia", code: 4) }
         return url
-    }
-
-    private static func waitUntilReady(_ input: AVAssetWriterInput) async throws {
-        let deadline = Date().addingTimeInterval(10)
-        while !input.isReadyForMoreMediaData {
-            if Date() > deadline { throw NSError(domain: "TestMedia", code: 5, userInfo: [NSLocalizedDescriptionKey: "Writer input stalled"]) }
-            try await Task.sleep(nanoseconds: 2_000_000)
-        }
     }
 
     private static func fill(_ buffer: CVPixelBuffer, frame: Int, of total: Int) {
